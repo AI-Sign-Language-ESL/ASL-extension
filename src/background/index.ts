@@ -5,6 +5,17 @@ import { logger } from '../utils/logger';
 
 let currentVideo: VideoInfo = { videoId: null, videoTitle: null, videoUrl: null };
 
+// Load persisted video info from chrome.storage.session on startup
+(async function loadPersistedVideoInfo() {
+  try {
+    const stored = await chrome.storage.session.get('currentVideo');
+    if (stored.currentVideo?.videoId) {
+      currentVideo = stored.currentVideo as VideoInfo;
+      logger.info('Loaded persisted video info:', currentVideo.videoId);
+    }
+  } catch {}
+})();
+
 function getApiBaseUrl(): string {
   return 'https://api.tafahom.io/api/v1';
 }
@@ -139,6 +150,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
   switch (message.type) {
     case 'VIDEO_INFO':
       currentVideo = message.payload as VideoInfo;
+      chrome.storage.session.set({ currentVideo: message.payload }).catch(() => {});
       sendResponse({ received: true });
       break;
     case 'GET_VIDEO_INFO':

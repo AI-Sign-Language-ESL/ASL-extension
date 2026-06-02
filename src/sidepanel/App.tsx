@@ -33,7 +33,12 @@ export default function App() {
     setIsAuth(!!session.token);
     try {
       const info = await sendMessage<VideoInfo>({ type: 'GET_VIDEO_INFO' });
-      if (info?.videoId) setVideoInfo(info);
+      if (info?.videoId) {
+        setVideoInfo(info);
+      } else {
+        // Content script may not have sent VIDEO_INFO yet; retry a few times
+        retryVideoInfo(5, 1000);
+      }
     } catch {}
     try {
       const stored = await chrome.storage.local.get(['translationResult', 'translationMeta']);
@@ -47,6 +52,20 @@ export default function App() {
         logger.info('Loaded stored translation result:', stored.translationResult.translation_id);
       }
     } catch {}
+  }
+
+  async function retryVideoInfo(maxAttempts: number, delayMs: number) {
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise((r) => setTimeout(r, delayMs));
+      try {
+        const info = await sendMessage<VideoInfo>({ type: 'GET_VIDEO_INFO' });
+        if (info?.videoId) {
+          setVideoInfo(info);
+          return;
+        }
+      } catch {}
+    }
+    logger.warn('Could not get video info after retries');
   }
 
   const handleMessage = (msg: ExtensionMessage) => {

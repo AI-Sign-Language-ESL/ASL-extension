@@ -135,6 +135,9 @@ function extractAndBroadcastInfo(): void {
       type: 'VIDEO_INFO',
       payload: { videoId: currentVideoId, videoTitle: currentVideoTitle, videoUrl: currentVideoUrl } as VideoInfo,
     } as ExtensionMessage).catch(() => {});
+    startVideoInfoInterval();
+  } else {
+    stopVideoInfoInterval();
   }
 }
 
@@ -171,15 +174,38 @@ function handleNavigation(): void {
   currentVideoId = null;
   removeButton();
   stopCaptionCapture();
-  setTimeout(extractAndBroadcastInfo, 1500);
+  stopVideoInfoInterval();
+  setTimeout(extractAndBroadcastInfo, 500);
 }
 
 document.addEventListener('yt-navigate-finish', handleNavigation);
+document.addEventListener('yt-page-data-updated', handleNavigation);
 window.addEventListener('popstate', () => {
-  setTimeout(extractAndBroadcastInfo, 1000);
+  setTimeout(extractAndBroadcastInfo, 500);
 });
 
-setTimeout(extractAndBroadcastInfo, 2000);
+// First detection attempt after page load
+setTimeout(extractAndBroadcastInfo, 1000);
+
+// Re-send VIDEO_INFO periodically to survive service worker restarts
+let videoInfoInterval: ReturnType<typeof setInterval> | null = null;
+function startVideoInfoInterval(): void {
+  stopVideoInfoInterval();
+  videoInfoInterval = setInterval(() => {
+    if (currentVideoId) {
+      chrome.runtime.sendMessage({
+        type: 'VIDEO_INFO',
+        payload: { videoId: currentVideoId, videoTitle: currentVideoTitle, videoUrl: currentVideoUrl } as VideoInfo,
+      } as ExtensionMessage).catch(() => {});
+    }
+  }, 3000);
+}
+function stopVideoInfoInterval(): void {
+  if (videoInfoInterval !== null) {
+    clearInterval(videoInfoInterval);
+    videoInfoInterval = null;
+  }
+}
 
 const styleEl = document.createElement('style');
 styleEl.textContent = `
