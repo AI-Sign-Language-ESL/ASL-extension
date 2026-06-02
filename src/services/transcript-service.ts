@@ -414,6 +414,21 @@ export async function enableCaptions(): Promise<boolean> {
   return false;
 }
 
+async function extractPlayerResponseFromMainWorld(): Promise<Record<string, unknown> | null> {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'FETCH_MAIN_PLAYER_RESPONSE' });
+    if (response?.data) {
+      logger.info('Retrieved ytInitialPlayerResponse via MAIN world execution');
+      cachePlayerResponse(response.data as Record<string, unknown>);
+      return response.data as Record<string, unknown>;
+    }
+    if (response?.error) logger.warn('MAIN world execution returned error:', response.error);
+  } catch (e) {
+    logger.warn('Failed to fetch via MAIN world execution:', (e as Error).message);
+  }
+  return null;
+}
+
 export function extractPlayerResponse(): Record<string, unknown> | null {
   console.log('[TAFAHOM] Starting extraction - checking ytInitialPlayerResponse');
 
@@ -636,7 +651,14 @@ export async function extractFromCaptionTracks(): Promise<{
   language: string;
 } | null> {
   console.log('[TAFAHOM] Starting extractFromCaptionTracks');
-  const playerResponse = extractPlayerResponse();
+
+  // Priority 1: access window.ytInitialPlayerResponse via MAIN world execution
+  let playerResponse = await extractPlayerResponseFromMainWorld();
+  // Priority 2: fall back to script tag parsing (works on initial page load)
+  if (!playerResponse) {
+    console.log('[TAFAHOM] MAIN world failed, trying script tag parsing');
+    playerResponse = extractPlayerResponse();
+  }
   if (!playerResponse) {
     logger.warn('No player response available for caption track extraction');
     console.log('[TAFAHOM] extractFromCaptionTracks: FAILED - no player response');

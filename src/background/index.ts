@@ -204,6 +204,30 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
     case 'GET_ME':
       handleGetMe(sendResponse);
       return true;
+    case 'FETCH_MAIN_PLAYER_RESPONSE':
+      (async () => {
+        try {
+          const tabId = sender.tab?.id;
+          if (!tabId) { sendResponse({ error: 'No tab' }); return; }
+          logger.info('Executing script in MAIN world for tab', tabId);
+          const [result] = await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: () => {
+              try {
+                return (window as any).ytInitialPlayerResponse || null;
+              } catch { return null; }
+            },
+          });
+          const data = result?.result as Record<string, unknown> | null | undefined;
+          logger.info('MAIN world execution result:', data ? 'data received' : 'null');
+          sendResponse({ data: data || null });
+        } catch (e) {
+          logger.error('MAIN world execution failed:', e);
+          sendResponse({ error: (e as Error).message });
+        }
+      })();
+      return true;
     case 'REFRESH_TOKEN':
       refreshTokenIfNeeded().then((ok) => sendResponse({ success: ok })).catch(() => sendResponse({ success: false }));
       return true;
