@@ -138,6 +138,15 @@ function extractAndBroadcastInfo(): void {
   }
 }
 
+function safeSendResponse(sendResponse: (response: unknown) => void, response: unknown): void {
+  try {
+    sendResponse(response);
+  } catch {
+    // Sender disconnected before response was ready - this is expected
+    // when the popup/sidepanel closes before async extraction completes
+  }
+}
+
 chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
   switch (message.type) {
     case 'GET_VIDEO_INFO':
@@ -146,10 +155,10 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
     case 'EXTRACT_TRANSCRIPT':
       extractTranscript()
         .then((result: ExtractionResult) => {
-          sendResponse({ success: true, ...result });
+          safeSendResponse(sendResponse, { success: true, ...result });
         })
         .catch((e) => {
-          sendResponse({ success: false, error: e.message });
+          safeSendResponse(sendResponse, { success: false, error: e.message });
         });
       return true;
     case 'PING':
