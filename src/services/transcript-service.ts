@@ -684,7 +684,7 @@ export async function extractFromCaptionTracks(): Promise<{
 }
 
 export async function extractTranscript(): Promise<ExtractionResult> {
-  console.log('[TAFAHOM] Starting extraction');
+  console.log('[TAFAHOM] Starting transcript extraction...');
   console.log('[TAFAHOM] Transcript rows:', document.querySelectorAll('ytd-transcript-segment-renderer').length);
   console.log('[TAFAHOM] Caption segments:', document.querySelectorAll('.ytp-caption-segment').length);
   console.log('[TAFAHOM] Caption container:', document.querySelector('.ytp-caption-window-container'));
@@ -692,14 +692,18 @@ export async function extractTranscript(): Promise<ExtractionResult> {
 
   const videoId = extractVideoId(window.location.href);
   if (!videoId) throw new TranscriptError('No video ID found', 'NO_VIDEO_ID');
+  console.log('[TAFAHOM] Video ID:', videoId);
 
   const titleEl = document.querySelector('h1.ytd-watch-metadata yt-formatted-string') ||
                   document.querySelector('#title h1');
   const videoTitle = titleEl?.textContent?.trim() || document.title.replace(' - YouTube', '').trim() || '';
 
+  console.log('[TAFAHOM] Trying caption tracks...');
   const vttResult = await extractFromCaptionTracks();
   if (vttResult && vttResult.segments.length > 0) {
     const language: DetectedLanguage = vttResult.language === 'ar' || vttResult.language === 'ara' ? 'arabic' : 'latin';
+    console.log('[TAFAHOM] Caption tracks succeeded - segments:', vttResult.segments.length, 'transcript length:', vttResult.transcript.length);
+    console.log('[TAFAHOM] Preparing backend request...');
     return {
       success: true,
       videoId,
@@ -710,12 +714,15 @@ export async function extractTranscript(): Promise<ExtractionResult> {
       language,
     };
   }
+  console.log('[TAFAHOM] Trying caption tracks... FAILED - returned null');
 
-  logger.info('VTT track extraction failed, trying transcript panel...');
+  console.log('[TAFAHOM] Trying transcript panel...');
   const panelResult = await extractFromTranscriptPanel();
   if (panelResult && panelResult.segments.length > 0) {
     const transcript = panelResult.transcript;
     const language = detectLanguage(transcript);
+    console.log('[TAFAHOM] Transcript panel succeeded - segments:', panelResult.segments.length, 'transcript length:', transcript.length);
+    console.log('[TAFAHOM] Preparing backend request...');
     return {
       success: true,
       videoId,
@@ -726,17 +733,19 @@ export async function extractTranscript(): Promise<ExtractionResult> {
       language,
     };
   }
+  console.log('[TAFAHOM] Trying transcript panel... FAILED');
 
-  logger.info('Transcript panel extraction failed, trying live captions...');
+  console.log('[TAFAHOM] Trying caption extraction...');
   const captionsAvailable = await enableCaptions();
   if (captionsAvailable) {
-    logger.info('Captions button clicked, waiting for caption elements...');
+    console.log('[TAFAHOM] Captions button clicked, waiting for caption elements...');
     startCaptionCapture();
     await sleep(4000);
     const captionResult = getCapturedCaptions();
     if (captionResult && captionResult.segments.length > 0) {
       const language = detectLanguage(captionResult.transcript);
-      logger.info(`Captured ${captionResult.segments.length} caption segments`);
+      console.log('[TAFAHOM] Live captions succeeded - segments:', captionResult.segments.length, 'transcript length:', captionResult.transcript.length);
+      console.log('[TAFAHOM] Preparing backend request...');
       return {
         success: true,
         videoId,
@@ -747,8 +756,17 @@ export async function extractTranscript(): Promise<ExtractionResult> {
         language,
       };
     }
-    logger.warn('No captions captured after 4s wait');
+    console.log('[TAFAHOM] Live captions: no segments captured after 4s wait');
+  } else {
+    console.log('[TAFAHOM] Live captions: no captions button found');
   }
+
+  console.log('[TAFAHOM] ALL EXTRACTION METHODS FAILED');
+  console.log('[TAFAHOM] Transcript object: null');
+  console.log('[TAFAHOM] Transcript length: 0');
+  console.log('[TAFAHOM] Segments: null');
+  console.log('[TAFAHOM] Segments length: 0');
+  console.log('[TAFAHOM] No request sent to backend - throwing error');
 
   throw new TranscriptError(
     'No transcript or captions available. Please ensure captions are enabled on this video.',
