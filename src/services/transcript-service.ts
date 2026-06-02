@@ -48,19 +48,19 @@ function findButtonByText(textPattern: RegExp): HTMLElement | null {
 }
 
 async function openTranscriptPanel(): Promise<boolean> {
-  const panelSelectors = [
-    '#panels ytd-transcript-renderer',
-    '#transcript ytd-transcript-renderer',
-    'ytd-transcript-renderer',
-    '#transcript-panel',
-    '#panels',
-    '#secondary ytd-transcript-renderer',
-    '#secondary #transcript',
-    '#transcript',
-  ];
-  for (const sel of panelSelectors) {
-    const panel = document.querySelector(sel);
-    if (panel && (panel as HTMLElement).offsetParent !== null) {
+  // Check for an already-open transcript panel (must contain transcript segments, not AI chat)
+  const transcriptEl = document.querySelector('ytd-transcript-renderer');
+  if (transcriptEl && (transcriptEl as HTMLElement).offsetParent !== null) {
+    const segments = transcriptEl.querySelector('#segments');
+    if (segments && segments.children.length > 0) {
+      logger.info('Transcript panel already open (ytd-transcript-renderer with segments)');
+      return true;
+    }
+  }
+  // Also check #transcript or visible ytd-transcript-renderer deeper in the DOM
+  for (const sel of ['#transcript ytd-transcript-renderer', '#panels ytd-transcript-renderer', '#transcript']) {
+    const el = document.querySelector(sel);
+    if (el && (el as HTMLElement).offsetParent !== null) {
       logger.info('Transcript panel already open (found via', sel, ')');
       return true;
     }
@@ -114,17 +114,21 @@ async function openTranscriptPanel(): Promise<boolean> {
 }
 
 function getPanelContainer(): Element | null {
+  // Must be a transcript renderer, NOT the AI chat panel (target-id="PAyouchat")
+  const transcriptEl = document.querySelector('ytd-transcript-renderer');
+  if (transcriptEl) {
+    const segments = transcriptEl.querySelector('#segments, ytd-transcript-segment-renderer');
+    if (segments) return transcriptEl;
+  }
+
   const panelSelectors = [
-    '#panels ytd-transcript-renderer',
     '#transcript ytd-transcript-renderer',
+    '#panels ytd-transcript-renderer',
     'ytd-transcript-renderer',
     '#transcript-panel',
-    '#panels',
+    '#transcript',
     '#secondary ytd-transcript-renderer',
     '#secondary #transcript',
-    '#transcript',
-    '#panels.ytd-watch-flexy',
-    'ytd-watch-flexy #panels',
   ];
   for (const sel of panelSelectors) {
     const el = document.querySelector(sel);
@@ -569,15 +573,93 @@ export function extractCaptionTracks(playerResponse: Record<string, unknown>): A
 }
 
 export async function downloadVTT(baseUrl: string): Promise<string> {
-  logger.info('Downloading VTT from:', baseUrl);
-  const response = await fetch(baseUrl);
+  // YouTube's baseUrl returns XML by default; append &fmt=vtt to get VTT format
+  const vttUrl = baseUrl.includes('?') ? baseUrl + '&fmt=vtt' : baseUrl + '?fmt=vtt';
+  logger.info('Downloading from:', vttUrl);
+  console.log('[TAFAHOM] Fetching:', vttUrl.slice(0, 120));
+
+  const response = await fetch(vttUrl);
+  console.log('[TAFAHOM] Status:', response.status);
+  console.log('[TAFAHOM] OK:', response.ok);
+  console.log('[TAFAHOM] Response URL:', response.url);
+
   if (!response.ok) {
-    throw new TranscriptError(`Failed to download VTT: HTTP ${response.status}`, 'VTT_DOWNLOAD_FAILED');
+    throw new TranscriptError(`Failed to download: HTTP ${response.status}`, 'VTT_DOWNLOAD_FAILED');
   }
-  const vtt = await response.text();
-  logger.info('Downloaded VTT size:', vtt.length, 'bytes');
-  console.log('[TAFAHOM] Downloaded VTT size:', vtt.length);
-  return vtt;
+
+  const text = await response.text();
+  console.log('[TAFAHOM] Response length:', text.length);
+  console.log('[TAFAHOM] Response preview:', text.slice(0, 1000));
+
+  if (!text || text.length === 0) {
+    throw new TranscriptError('Empty response from caption track', 'EMPTY_RESPONSE');
+  }
+
+  // If response is XML (YouTube's default format), parse it and convert to VTT-style lines
+  if (text.trim().startsWith('<?xml') || text.trim().startsWith('<transcript')) {
+    logger.info('Detected XML transcript, parsing XML');
+    const converted = parseXMLTranscript(text);
+    logger.info('Converted XML to', converted.length, 'segments');
+    return converted;
+  }
+
+  logger.info('Downloaded size:', text.length, 'bytes');
+  return text;
+}
+
+function parseXMLTranscript(xml: string): string {
+  const segments: string[] = [];
+  const lines = xml.split(/\r?\n/);
+  let currentLine = '';
+
+  // Simple regex-based XML parser
+  const textRegex = /<text[^>]*start=["']?([\d.]+)["']?[^>]*dur=["']?([\d.]+)["']?[^>]*>(.*?)<\/text>/g;
+  let match: RegExpExecArray | null;
+
+  // Remove namespaces and try different patterns
+  let cleanedXml = xml.replace(/<\?xml[^>]*\?>/g, '').trim();
+
+  // Try parsing <text> elements with start/dur attributes
+  const textTagRegex = /<text[^>]*start=["']?([\d.]+)["']?[^>]*>(.*?)<\/text>/gs;
+  let textMatch: RegExpExecArray | null;
+
+  while ((textMatch = textTagRegex.exec(cleanedXml)) !== null) {
+    const startSeconds = parseFloat(textMatch[1]);
+    const rawText = textMatch[2]
+      .replace(/<[^>]+>/g, '')      // strip inner HTML tags
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .trim();
+
+    if (!rawText) continue;
+
+    const startDate = new Date(0);
+    startDate.setSeconds(startSeconds);
+    const timeStr = startDate.toISOString().substr(11, 12).replace(',', '.') + '000';
+
+    const endSeconds = startSeconds + 2; // approximate duration
+    const endDate = new Date(0);
+    endDate.setSeconds(endSeconds);
+    const endTimeStr = endDate.toISOString().substr(11, 12).replace(',', '.') + '000';
+
+    segments.push(`${timeStr} --> ${endTimeStr}`);
+    segments.push(rawText);
+    segments.push('');
+  }
+
+  if (segments.length === 0) {
+    // Fallback: just return the raw text as a single segment
+    const plainText = cleanedXml.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    if (plainText) {
+      segments.push('00:00:00.000 --> 00:00:05.000');
+      segments.push(plainText);
+    }
+  }
+
+  return 'WEBVTT\n\n' + segments.join('\n');
 }
 
 export function parseVTT(vttContent: string): TranscriptSegmentWithTimestamp[] {
