@@ -414,52 +414,7 @@ export async function enableCaptions(): Promise<boolean> {
   return false;
 }
 
-export function extractPlayerResponseFromPage(): Promise<Record<string, unknown> | null> {
-  return new Promise((resolve) => {
-    console.log('[TAFAHOM] Injecting page script to read ytInitialPlayerResponse');
-
-    const eventName = 'tafahom:player-response';
-
-    const handler = (e: Event) => {
-      const customEvent = e as CustomEvent;
-      document.removeEventListener(eventName, handler);
-      const data = customEvent.detail;
-      if (data && typeof data === 'object') {
-        console.log('[TAFAHOM] Page script returned ytInitialPlayerResponse');
-        resolve(data as Record<string, unknown>);
-      } else {
-        console.log('[TAFAHOM] Page script returned null/undefined');
-        resolve(null);
-      }
-    };
-    document.addEventListener(eventName, handler);
-
-    const script = document.createElement('script');
-    script.textContent = `
-      (function() {
-        try {
-          var data = window.ytInitialPlayerResponse;
-          if (data && typeof data.captions === 'object' && data.captions.playerCaptionsTracklistRenderer) {
-            document.dispatchEvent(new CustomEvent('${eventName}', { detail: data }));
-          } else {
-            document.dispatchEvent(new CustomEvent('${eventName}', { detail: null }));
-          }
-        } catch(e) {
-          document.dispatchEvent(new CustomEvent('${eventName}', { detail: null }));
-        }
-      })();
-    `;
-    document.documentElement.appendChild(script);
-    script.remove();
-
-    setTimeout(() => {
-      document.removeEventListener(eventName, handler);
-      resolve(null);
-    }, 1000);
-  });
-}
-
-export async function extractPlayerResponse(): Promise<Record<string, unknown> | null> {
+export function extractPlayerResponse(): Record<string, unknown> | null {
   console.log('[TAFAHOM] Starting extraction - checking ytInitialPlayerResponse');
 
   try {
@@ -543,15 +498,7 @@ export async function extractPlayerResponse(): Promise<Record<string, unknown> |
     logger.error('Failed to parse ytInitialPlayerResponse:', e);
   }
 
-  console.log('[TAFAHOM] Script tag parsing failed, trying page-context injection...');
-  const pageData = await extractPlayerResponseFromPage();
-  if (pageData) {
-    cachePlayerResponse(pageData);
-    console.log('[TAFAHOM] Retrieved player response via page script injection');
-    return pageData;
-  }
-
-  logger.warn('ytInitialPlayerResponse not found via any method');
+  logger.warn('ytInitialPlayerResponse not found');
   console.log('[TAFAHOM] ytInitialPlayerResponse NOT FOUND - no caption tracks available');
   return null;
 }
@@ -689,7 +636,7 @@ export async function extractFromCaptionTracks(): Promise<{
   language: string;
 } | null> {
   console.log('[TAFAHOM] Starting extractFromCaptionTracks');
-  const playerResponse = await extractPlayerResponse();
+  const playerResponse = extractPlayerResponse();
   if (!playerResponse) {
     logger.warn('No player response available for caption track extraction');
     console.log('[TAFAHOM] extractFromCaptionTracks: FAILED - no player response');
