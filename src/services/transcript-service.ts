@@ -420,13 +420,45 @@ export async function enableCaptions(): Promise<boolean> {
 
 async function extractPlayerResponseFromMainWorld(): Promise<Record<string, unknown> | null> {
   try {
-    const response = await chrome.runtime.sendMessage({ type: 'FETCH_MAIN_PLAYER_RESPONSE' });
+    const response = await new Promise<any>((resolve) => {
+      let isResolved = false;
+      const timeoutId = setTimeout(() => {
+        if (!isResolved) {
+          isResolved = true;
+          console.warn('[TAFAHOM] sendMessage timed out after 1000ms');
+          resolve(null);
+        }
+      }, 1000);
+
+      try {
+        chrome.runtime.sendMessage({ type: 'FETCH_MAIN_PLAYER_RESPONSE' }, (res) => {
+          if (isResolved) return;
+          isResolved = true;
+          clearTimeout(timeoutId);
+          if (chrome.runtime.lastError) {
+            console.warn('[TAFAHOM] sendMessage lastError:', chrome.runtime.lastError.message);
+            resolve(null);
+          } else {
+            resolve(res);
+          }
+        });
+      } catch (err) {
+        if (isResolved) return;
+        isResolved = true;
+        clearTimeout(timeoutId);
+        console.warn('[TAFAHOM] sendMessage threw sync error:', err);
+        resolve(null);
+      }
+    });
+
     if (response?.data) {
       logger.info('Retrieved ytInitialPlayerResponse via MAIN world execution');
       cachePlayerResponse(response.data as Record<string, unknown>);
       return response.data as Record<string, unknown>;
     }
-    if (response?.error) logger.warn('MAIN world execution returned error:', response.error);
+    if (response?.error) {
+      logger.warn('MAIN world execution returned error:', response.error);
+    }
   } catch (e) {
     logger.warn('Failed to fetch via MAIN world execution:', (e as Error).message);
   }
@@ -573,38 +605,131 @@ export function extractCaptionTracks(playerResponse: Record<string, unknown>): A
 }
 
 export async function downloadVTT(baseUrl: string): Promise<string> {
-  // YouTube's baseUrl returns XML by default; append &fmt=vtt to get VTT format
-  const vttUrl = baseUrl.includes('?') ? baseUrl + '&fmt=vtt' : baseUrl + '?fmt=vtt';
-  logger.info('Downloading from:', vttUrl);
-  console.log('[TAFAHOM] Fetching:', vttUrl.slice(0, 120));
+  const formats = [
+    { label: 'VTT', url: baseUrl.includes('?') ? baseUrl + '&fmt=vtt' : baseUrl + '?fmt=vtt' },
+    { label: 'XML', url: baseUrl },
+    { label: 'JSON', url: baseUrl.includes('?') ? baseUrl + '&fmt=json3' : baseUrl + '?fmt=json3' }
+  ];
 
-  const response = await fetch(vttUrl);
-  console.log('[TAFAHOM] Status:', response.status);
-  console.log('[TAFAHOM] OK:', response.ok);
-  console.log('[TAFAHOM] Response URL:', response.url);
+  for (const { label, url } of formats) {
+    logger.info(`Trying ${label} format from:`, url);
+    let text = '';
+    let response: Response | null = null;
+    
+    try {
+      response = await fetch(url);
+      if (response.ok) {
+        text = await response.text();
+      }
+      
+      // Temporary Debug Mode requested by user
+      if (response.ok && (!text || text.length === 0)) {
+        console.warn(`[TAFAHOM] DEBUG: ${label} fetch returned 0 bytes!`);
+        console.log('[TAFAHOM] trackUrl:', url);
+        console.log('[TAFAHOM] response.headers:', [...response.headers.entries()]);
+        console.log('[TAFAHOM] response.type:', response.type);
+        console.log('[TAFAHOM] response.url:', response.url);
+      }
+    } catch (e) {
+      console.warn(`[TAFAHOM] ${label} fetch failed natively`);
+    }
 
-  if (!response.ok) {
-    throw new TranscriptError(`Failed to download: HTTP ${response.status}`, 'VTT_DOWNLOAD_FAILED');
+    if (!text || text.length === 0) {
+      console.log(`[TAFAHOM] Empty response for ${label}, attempting background fetch...`);
+      try {
+        const bgResponse = await new Promise<any>((resolve) => {
+          let resolved = false;
+          const timeoutId = setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              console.warn(`[TAFAHOM] Background fetch timed out after 3000ms for ${label}`);
+              resolve(null);
+            }
+          }, 3000);
+
+          try {
+            chrome.runtime.sendMessage({ type: 'FETCH_TEXT', payload: { url } }, (res) => {
+              if (resolved) return;
+              resolved = true;
+              clearTimeout(timeoutId);
+              if (chrome.runtime.lastError) {
+                console.warn(`[TAFAHOM] Background fetch lastError for ${label}:`, chrome.runtime.lastError.message);
+                resolve(null);
+              } else {
+                resolve(res);
+              }
+            });
+          } catch (e) {
+            if (resolved) return;
+            resolved = true;
+            clearTimeout(timeoutId);
+            resolve(null);
+          }
+        });
+        
+        if (bgResponse && bgResponse.text) {
+          text = bgResponse.text;
+          console.log(`[TAFAHOM] Background fetch successful for ${label}. Length:`, text.length);
+        } else {
+          console.warn(`[TAFAHOM] Background fetch returned no text or failed for ${label}:`, bgResponse?.error);
+        }
+      } catch (e) {
+        console.warn(`[TAFAHOM] Background fetch threw error for ${label}:`, e);
+      }
+    }
+
+    if (text && text.length > 0) {
+      // We got text! Determine format and convert to VTT if needed
+      const trimmed = text.trim();
+      if (trimmed.startsWith('<?xml') || trimmed.startsWith('<transcript')) {
+        logger.info('Detected XML transcript, parsing XML');
+        return parseXMLTranscript(text);
+      } else if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+        logger.info('Detected JSON transcript, parsing JSON');
+        return parseJSONTranscript(text);
+      } else {
+        logger.info('Downloaded VTT size:', text.length, 'bytes');
+        return text;
+      }
+    }
   }
 
-  const text = await response.text();
-  console.log('[TAFAHOM] Response length:', text.length);
-  console.log('[TAFAHOM] Response preview:', text.slice(0, 1000));
+  console.log('[TAFAHOM] Empty response from all caption track fetch attempts (VTT, XML, JSON)');
+  return '';
+}
 
-  if (!text || text.length === 0) {
-    throw new TranscriptError('Empty response from caption track', 'EMPTY_RESPONSE');
+function parseJSONTranscript(jsonStr: string): string {
+  try {
+    const data = JSON.parse(jsonStr);
+    const segments: string[] = [];
+    if (data.events) {
+      for (const event of data.events) {
+        if (!event.segs || !event.tStartMs) continue;
+        const startSeconds = event.tStartMs / 1000;
+        const durMs = event.dDurationMs || 2000;
+        const endSeconds = (event.tStartMs + durMs) / 1000;
+        
+        const rawText = event.segs.map((s: any) => s.utf8).join('').replace(/\s+/g, ' ').trim();
+        if (!rawText || rawText === '\n') continue;
+
+        const startDate = new Date(0);
+        startDate.setMilliseconds(event.tStartMs);
+        const timeStr = startDate.toISOString().substr(11, 12).replace(',', '.') + '000';
+
+        const endDate = new Date(0);
+        endDate.setMilliseconds(event.tStartMs + durMs);
+        const endTimeStr = endDate.toISOString().substr(11, 12).replace(',', '.') + '000';
+
+        segments.push(`${timeStr} --> ${endTimeStr}`);
+        segments.push(rawText);
+        segments.push('');
+      }
+    }
+    return 'WEBVTT\n\n' + segments.join('\n');
+  } catch (e) {
+    logger.warn('Failed to parse JSON transcript:', e);
+    return '';
   }
-
-  // If response is XML (YouTube's default format), parse it and convert to VTT-style lines
-  if (text.trim().startsWith('<?xml') || text.trim().startsWith('<transcript')) {
-    logger.info('Detected XML transcript, parsing XML');
-    const converted = parseXMLTranscript(text);
-    logger.info('Converted XML to', converted.length, 'segments');
-    return converted;
-  }
-
-  logger.info('Downloaded size:', text.length, 'bytes');
-  return text;
 }
 
 function parseXMLTranscript(xml: string): string {

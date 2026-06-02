@@ -4,6 +4,7 @@ import { authService } from '../services/auth';
 import { api } from '../services/api';
 import { sendMessage, sendMessageToCurrentTab } from '../utils/messages';
 import { logger } from '../utils/logger';
+import { parseVTT } from '../services/transcript-service';
 import LoginForm from './components/LoginForm';
 import RegisterForm from './components/RegisterForm';
 import VideoInfoCard from './components/VideoInfoCard';
@@ -21,7 +22,54 @@ export default function App() {
   const [extractionSource, setExtractionSource] = useState<ExtractionSource | null>(null);
   const [detectedLang, setDetectedLang] = useState<DetectedLanguage | null>(null);
 
-  useEffect(() => { init(); }, []);
+  useEffect(() => {
+    init();
+
+    const messageListener = (message: any) => {
+      if (message.type === 'VIDEO_INFO' && message.payload?.videoId) {
+        setVideoInfo(message.payload);
+      }
+    };
+    if (chrome.runtime?.onMessage) {
+      chrome.runtime.onMessage.addListener(messageListener);
+    }
+    
+    return () => {
+      if (chrome.runtime?.onMessage) {
+        chrome.runtime.onMessage.removeListener(messageListener);
+      }
+    };
+  }, []);
+
+  async function fetchVideoInfoWithRetry(retries = 3, delay = 500) {
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = tabs[0];
+      if (!tab || !tab.url?.includes('youtube.com/watch')) {
+        return;
+      }
+      
+      for (let i = 0; i < retries; i++) {
+        console.log('[POPUP] Active tab URL:', tab.url);
+        console.log(`[POPUP] Sending GET_VIDEO_INFO (Attempt ${i + 1})`);
+        try {
+          const info = await sendMessageToCurrentTab<VideoInfo>({ type: 'GET_VIDEO_INFO' });
+          if (info && info.videoId) {
+            console.log('[POPUP] Response received:', info);
+            setVideoInfo(info);
+            return;
+          }
+        } catch (e) {
+          console.log('[POPUP] Attempt failed:', e);
+        }
+        if (i < retries - 1) {
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    } catch (e) {
+      console.log('[POPUP] Could not fetch video info:', e);
+    }
+  }
 
   async function init() {
     try {
@@ -29,8 +77,7 @@ export default function App() {
       const isAuth = !!session.token;
       setAuth({ isAuthenticated: isAuth, user: session.user, token: session.token, loading: false });
       setView(isAuth ? 'main' : 'auth');
-      const info = await sendMessage<VideoInfo>({ type: 'GET_VIDEO_INFO' });
-      if (info?.videoId) setVideoInfo(info);
+      fetchVideoInfoWithRetry();
     } catch {
       setAuth({ isAuthenticated: false, user: null, token: null, loading: false });
       setView('auth');
@@ -92,24 +139,22 @@ export default function App() {
     }
   }, []);
 
-  const handleTranslate = useCallback(async () => {
+  const [uploadMessage, setUploadMessage] = useState<string | null>(null);
+
+  // ... (keep existing handleTranslate but we need to modify how it works or just use a helper for starting translation)
+
+  const startTranslationWithData = async (transcript: string, segments: any[], source: ExtractionSource) => {
     setError(null);
     setTranslationState('translating');
     try {
-      const transcriptResponse = await sendMessageToCurrentTab<{
-        success: boolean; transcript?: string; segments?: unknown[];
-        source?: ExtractionSource; language?: DetectedLanguage; error?: string;
-      }>({ type: 'EXTRACT_TRANSCRIPT' });
-      if (!transcriptResponse?.success || !transcriptResponse.transcript) {
-        throw new Error(transcriptResponse?.error || 'No transcript');
-      }
       const response = await sendMessage<{ success: boolean; result?: unknown; error?: string }>({
         type: 'START_TRANSLATION',
         payload: {
           videoId: videoInfo.videoId,
           videoTitle: videoInfo.videoTitle,
-          transcript: transcriptResponse.transcript,
-          segments: transcriptResponse.segments,
+          transcript,
+          segments,
+          source, // Note: the backend may or may not use this, but it will be passed
         },
       });
       if (response?.success) {
@@ -127,7 +172,54 @@ export default function App() {
       setTranslationState('idle');
       setError((e as Error).message);
     }
+  };
+
+  const handleTranslate = useCallback(async () => {
+    setError(null);
+    setTranslationState('translating');
+    try {
+      const transcriptResponse = await sendMessageToCurrentTab<{
+        success: boolean; transcript?: string; segments?: unknown[];
+        source?: ExtractionSource; language?: DetectedLanguage; error?: string;
+      }>({ type: 'EXTRACT_TRANSCRIPT' });
+      if (!transcriptResponse?.success || !transcriptResponse.transcript) {
+        throw new Error(transcriptResponse?.error || 'No transcript');
+      }
+      await startTranslationWithData(transcriptResponse.transcript, transcriptResponse.segments || [], transcriptResponse.source || 'unavailable');
+    } catch (e) {
+      setTranslationState('idle');
+      setError((e as Error).message);
+    }
   }, [videoInfo]);
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setError(null);
+    setUploadMessage('Loading subtitle file...');
+    try {
+      const text = await file.text();
+      const segments = parseVTT(text);
+      
+      if (!segments || segments.length === 0) {
+        throw new Error('No valid segments found in uploaded VTT file.');
+      }
+      
+      const transcript = segments.map(s => s.text).join(' ');
+      
+      setUploadMessage(`✓ Subtitle file loaded\n✓ Parsed ${segments.length} segments\n✓ Sending transcript to Tafahom...`);
+      setExtractionSource('uploaded_vtt');
+      setTranscriptState('available');
+      
+      // Auto-start translation
+      await startTranslationWithData(transcript, segments, 'uploaded_vtt');
+      setUploadMessage(null); // Clear upload message once translation completes/fails to let translation state handle UI
+    } catch (e) {
+      setError((e as Error).message);
+      setUploadMessage(null);
+    }
+  };
 
   if (auth.loading) {
     return (
@@ -153,38 +245,66 @@ export default function App() {
         <>
           <VideoInfoCard videoInfo={videoInfo} />
           <div className="card">
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                className="btn btn-primary"
-                onClick={handleExtract}
-                disabled={!videoInfo.videoId || transcriptState === 'extracting'}
-              >
-                {transcriptState === 'extracting' ? (
-                  <><div className="spinner" /> Extracting...</>
-                ) : (
-                  'Extract Transcript'
-                )}
-              </button>
-              <button className="btn btn-secondary" onClick={async () => {
-                try {
-                  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-                  if (tabs[0]?.id) {
-                    await chrome.sidePanel.open({ tabId: tabs[0].id });
+            
+            {transcriptState === 'error' || transcriptState === 'unavailable' ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ color: '#ff4d4f', fontWeight: 500, textAlign: 'center' }}>
+                  Automatic transcript extraction failed.
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="btn btn-primary" onClick={handleExtract} style={{ flex: 1 }}>
+                    Retry Extraction
+                  </button>
+                  <label className="btn btn-secondary" style={{ flex: 1, textAlign: 'center', cursor: 'pointer', margin: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+                    Upload Subtitle File (.vtt)
+                    <input type="file" accept=".vtt" onChange={handleFileUpload} style={{ display: 'none' }} />
+                  </label>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  className="btn btn-primary"
+                  onClick={handleExtract}
+                  disabled={!videoInfo.videoId || transcriptState === 'extracting'}
+                >
+                  {transcriptState === 'extracting' ? (
+                    <><div className="spinner" /> Extracting...</>
+                  ) : (
+                    'Extract Transcript'
+                  )}
+                </button>
+                <button className="btn btn-secondary" onClick={async () => {
+                  try {
+                    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+                    if (tabs[0]?.id) {
+                      await chrome.sidePanel.open({ tabId: tabs[0].id });
+                    }
+                  } catch (e) {
+                    logger.error('Open Panel failed:', e);
                   }
-                } catch (e) {
-                  logger.error('Open Panel failed:', e);
-                }
-              }}>
-                Open Panel
-              </button>
-            </div>
+                }}>
+                  Open Panel
+                </button>
+              </div>
+            )}
+
             {extractionSource && (
               <div className="source-badge" style={{ marginTop: 8 }}>
-                {extractionSource === 'transcript_panel' ? '📝 Transcript Panel' : '🎤 Live Captions'}
+                {extractionSource === 'transcript_panel' ? '📝 Transcript Panel' : 
+                 extractionSource === 'live_captions' ? '🎤 Live Captions' : 
+                 extractionSource === 'uploaded_vtt' ? '📁 Uploaded VTT' : 'Caption Track'}
                 {detectedLang && ` · ${detectedLang === 'arabic' ? 'Arabic' : detectedLang === 'latin' ? 'English' : ''}`}
               </div>
             )}
-            {transcriptState === 'available' && (
+            
+            {uploadMessage && (
+              <div className="success" style={{ marginTop: 8, whiteSpace: 'pre-line' }}>
+                {uploadMessage}
+              </div>
+            )}
+
+            {transcriptState === 'available' && !uploadMessage && (
               <button
                 className="btn btn-primary"
                 style={{ marginTop: 8 }}

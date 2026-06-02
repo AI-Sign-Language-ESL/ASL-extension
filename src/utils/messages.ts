@@ -1,14 +1,32 @@
 import type { ExtensionMessage } from '../types';
 
-export function sendMessage<T = unknown>(msg: ExtensionMessage): Promise<T> {
-  return chrome.runtime.sendMessage(msg) as Promise<T>;
+export async function sendMessage<T = unknown>(msg: ExtensionMessage): Promise<T> {
+  try {
+    if (!chrome.runtime?.id) {
+      console.warn('[TAFAHOM] Extension context lost in messages.ts');
+      return Promise.reject(new Error('Extension context invalidated'));
+    }
+    return await chrome.runtime.sendMessage(msg);
+  } catch (e) {
+    console.error('[TAFAHOM] sendMessage failed:', e);
+    return Promise.reject(e);
+  }
 }
 
-export function sendMessageToTab<T = unknown>(
+export async function sendMessageToTab<T = unknown>(
   tabId: number,
   msg: ExtensionMessage
 ): Promise<T> {
-  return chrome.tabs.sendMessage(tabId, msg) as Promise<T>;
+  try {
+    if (!chrome.runtime?.id) {
+      console.warn('[TAFAHOM] Extension context lost in messages.ts');
+      return Promise.reject(new Error('Extension context invalidated'));
+    }
+    return await chrome.tabs.sendMessage(tabId, msg);
+  } catch (e) {
+    console.error('[TAFAHOM] sendMessageToTab failed:', e);
+    return Promise.reject(e);
+  }
 }
 
 export function sendMessageToCurrentTab<T = unknown>(

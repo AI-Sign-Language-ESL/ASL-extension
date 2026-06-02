@@ -8,6 +8,20 @@ let currentVideoUrl = '';
 let tafahomButton: HTMLElement | null = null;
 let extractionInProgress = false;
 
+async function safeSendMessage(message: any): Promise<any> {
+  try {
+    console.log('[TAFAHOM] Sending message:', message.type);
+    if (!chrome.runtime?.id) {
+      console.error('[TAFAHOM] Extension context lost (Runtime unavailable)');
+      return null;
+    }
+    return await chrome.runtime.sendMessage(message);
+  } catch (e) {
+    console.error('[TAFAHOM] Message failed:', e);
+    return null;
+  }
+}
+
 function isYouTubePage(): boolean {
   return window.location.hostname.includes('youtube.com') || window.location.hostname.includes('youtu.be');
 }
@@ -92,7 +106,7 @@ async function handleTranslateClick(): Promise<void> {
   try {
     const result = await extractTranscript();
     setButtonState('loading', 'Sending to Tafahom...');
-    const response = await chrome.runtime.sendMessage({
+    const response = await safeSendMessage({
       type: 'TRANSCRIPT_READY',
       payload: {
         videoId: result.videoId,
@@ -105,7 +119,7 @@ async function handleTranslateClick(): Promise<void> {
     });
     if (response?.success) {
       setButtonState('success', 'Sent to Tafahom!');
-      chrome.runtime.sendMessage({ type: 'OPEN_SIDE_PANEL' }).catch(() => {});
+      safeSendMessage({ type: 'OPEN_SIDE_PANEL' });
     } else {
       setButtonState('error', response?.error || 'Failed');
       logger.error('Translation submission failed:', response?.error);
@@ -131,10 +145,10 @@ function extractAndBroadcastInfo(): void {
   if (title) currentVideoTitle = title;
   if (url) currentVideoUrl = url;
   if (currentVideoId) {
-    chrome.runtime.sendMessage({
+    safeSendMessage({
       type: 'VIDEO_INFO',
       payload: { videoId: currentVideoId, videoTitle: currentVideoTitle, videoUrl: currentVideoUrl } as VideoInfo,
-    } as ExtensionMessage).catch(() => {});
+    });
     startVideoInfoInterval();
   } else {
     stopVideoInfoInterval();
@@ -151,6 +165,7 @@ function safeSendResponse(sendResponse: (response: unknown) => void, response: u
 }
 
 chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
+  console.log('[TAFAHOM] Message received:', message);
   switch (message.type) {
     case 'GET_VIDEO_INFO':
       sendResponse({ videoId: currentVideoId, videoTitle: currentVideoTitle, videoUrl: currentVideoUrl } as VideoInfo);
@@ -193,10 +208,10 @@ function startVideoInfoInterval(): void {
   stopVideoInfoInterval();
   videoInfoInterval = setInterval(() => {
     if (currentVideoId) {
-      chrome.runtime.sendMessage({
+      safeSendMessage({
         type: 'VIDEO_INFO',
         payload: { videoId: currentVideoId, videoTitle: currentVideoTitle, videoUrl: currentVideoUrl } as VideoInfo,
-      } as ExtensionMessage).catch(() => {});
+      });
     }
   }, 3000);
 }

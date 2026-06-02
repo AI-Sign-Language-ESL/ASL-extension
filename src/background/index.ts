@@ -231,6 +231,42 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
     case 'REFRESH_TOKEN':
       refreshTokenIfNeeded().then((ok) => sendResponse({ success: ok })).catch(() => sendResponse({ success: false }));
       return true;
+    case 'FETCH_TEXT':
+      console.log('[BACKGROUND] FETCH_TEXT received', message);
+      (async () => {
+        try {
+          if (!message.payload || !(message.payload as any).url) {
+            console.error('[BACKGROUND] Missing URL in payload');
+            sendResponse({ error: 'Missing URL in payload' });
+            return;
+          }
+          
+          const url = (message.payload as any).url;
+          console.log('[BACKGROUND] Fetch started for URL:', url);
+          
+          const resp = await fetch(url);
+          console.log('[BACKGROUND] Fetch completed. Status:', resp.status);
+          console.log('[BACKGROUND] Headers:', [...resp.headers.entries()]);
+          
+          if (!resp.ok) {
+            console.warn('[BACKGROUND] Sending response: error HTTP', resp.status);
+            sendResponse({ error: `HTTP ${resp.status}` });
+            return;
+          }
+          
+          const text = await resp.text();
+          console.log('[BACKGROUND] Text length:', text.length);
+          console.log('[BACKGROUND] Preview:', text.slice(0, 1000));
+          
+          console.log('[BACKGROUND] Sending response');
+          sendResponse({ text });
+        } catch (e) {
+          console.error('[BACKGROUND] Fetch failed:', e);
+          console.log('[BACKGROUND] Sending response with error');
+          sendResponse({ error: (e as Error).message });
+        }
+      })();
+      return true;
     default:
       logger.warn('Unknown message type:', message.type);
       sendResponse({ error: `Unknown type: ${message.type}` });
@@ -239,7 +275,13 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && tab.url?.includes('youtube.com/watch')) {
-    chrome.tabs.sendMessage(tabId, { type: 'PING' } as ExtensionMessage).catch(() => {});
+    try {
+      if (chrome.runtime?.id) {
+        chrome.tabs.sendMessage(tabId, { type: 'PING' } as ExtensionMessage).catch(() => {});
+      }
+    } catch (e) {
+      logger.warn('Failed to send PING msg', e);
+    }
   }
 });
 

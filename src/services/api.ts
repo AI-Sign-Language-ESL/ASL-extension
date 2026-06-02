@@ -57,7 +57,13 @@ class TafahomAPI {
         response = await fetch(url, { ...options, headers });
       } else {
         await authService.clearSession();
-        chrome.runtime.sendMessage({ type: 'AUTH_EXPIRED' });
+        try {
+          if (chrome.runtime?.id) {
+            chrome.runtime.sendMessage({ type: 'AUTH_EXPIRED' }).catch(() => {});
+          }
+        } catch (e) {
+          logger.warn('Failed to send AUTH_EXPIRED msg', e);
+        }
         throw new ApiError('Session expired', 401);
       }
     }
