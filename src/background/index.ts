@@ -1,0 +1,217 @@
+import type { ExtensionMessage, VideoInfo, TranslationResult, TranscriptSegmentWithTimestamp, DetectedLanguage } from '../types';
+import { authService } from '../services/auth';
+import { clearExpiredCache } from '../utils/cache';
+import { logger } from '../utils/logger';
+
+let currentVideo: VideoInfo = { videoId: null, videoTitle: null, videoUrl: null };
+
+function getApiBaseUrl(): string {
+  return 'https://api.tafahom.io/api/v1';
+}
+
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const session = await authService.getSession();
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (session.token) headers['Authorization'] = `Bearer ${session.token}`;
+  return headers;
+}
+
+async function refreshTokenIfNeeded(): Promise<boolean> {
+  const session = await authService.getSession();
+  if (!session.refresh) return false;
+  try {
+    const resp = await fetch(`${getApiBaseUrl()}/authentication/token/refresh/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh: session.refresh }),
+    });
+    if (!resp.ok) throw new Error('Refresh failed');
+    const data = await resp.json() as { access: string; refresh?: string };
+    await authService.saveSession(data.access, data.refresh || session.refresh);
+    return true;
+  } catch (e) {
+    logger.error('Token refresh failed:', e);
+    await authService.clearSession();
+    return false;
+  }
+}
+
+async function authenticatedFetch<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  const url = endpoint.startsWith('http') ? endpoint : `${getApiBaseUrl()}${endpoint}`;
+  let headers = await getAuthHeaders();
+  const mergedHeaders = { ...headers, ...(options.headers as Record<string, string> || {}) };
+  const opts = { ...options, headers: mergedHeaders };
+  let response = await fetch(url, opts);
+  if (response.status === 401) {
+    const refreshed = await refreshTokenIfNeeded();
+    if (refreshed) {
+      headers = await getAuthHeaders();
+      opts.headers = { ...headers, ...(options.headers as Record<string, string> || {}) };
+      response = await fetch(url, opts);
+    } else {
+      throw new Error('Session expired. Please log in again.');
+    }
+  }
+  if (!response.ok) {
+    let errorMsg = `HTTP ${response.status}`;
+    try {
+      const errorData = await response.json() as Record<string, unknown>;
+      errorMsg = (errorData.error as string) || (errorData.detail as string) || errorMsg;
+    } catch {}
+    throw new Error(errorMsg);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function handleTranscriptReady(
+  payload: {
+    videoId: string;
+    videoTitle: string;
+    transcript: string;
+    segments: TranscriptSegmentWithTimestamp[];
+    source: string;
+    language: DetectedLanguage;
+  },
+  sendResponse: (response: unknown) => void
+): Promise<void> {
+  try {
+    logger.info('TRANSCRIPT_READY: Submitting to process-transcript endpoint');
+    const result = await authenticatedFetch<TranslationResult>('/youtube/process-transcript/', {
+      method: 'POST',
+      body: JSON.stringify({
+        video_id: payload.videoId,
+        title: payload.videoTitle,
+        transcript: payload.transcript,
+        segments: payload.segments,
+        source: payload.source,
+        language: payload.language,
+      }),
+    });
+    logger.info('TRANSCRIPT_READY: Success', result);
+    await chrome.storage.local.set({
+      translationResult: result,
+      translationMeta: { source: payload.source, language: payload.language, videoId: payload.videoId, videoTitle: payload.videoTitle },
+    });
+    logger.info('Translation result stored in chrome.storage.local');
+    sendResponse({ success: true, result });
+  } catch (e) {
+    logger.error('TRANSCRIPT_READY: Failed', e);
+    sendResponse({ success: false, error: (e as Error).message });
+  }
+}
+
+async function handleStartTranslation(
+  payload: { videoId: string; videoTitle: string; transcript: string; segments?: TranscriptSegmentWithTimestamp[] },
+  sendResponse: (response: unknown) => void
+): Promise<void> {
+  try {
+    logger.info('START_TRANSLATION: Submitting to backend');
+    const result = await authenticatedFetch<TranslationResult>('/youtube/process-transcript/', {
+      method: 'POST',
+      body: JSON.stringify({
+        video_id: payload.videoId,
+        title: payload.videoTitle,
+        transcript: payload.transcript,
+        segments: payload.segments || [],
+      }),
+    });
+    logger.info('START_TRANSLATION: Success', result);
+    await chrome.storage.local.set({ translationResult: result });
+    logger.info('Translation result stored in chrome.storage.local');
+    sendResponse({ success: true, result });
+  } catch (e) {
+    logger.error('START_TRANSLATION: Failed', e);
+    sendResponse({ success: false, error: (e as Error).message });
+  }
+}
+
+async function handleGetMe(sendResponse: (response: unknown) => void): Promise<void> {
+  try {
+    const user = await authenticatedFetch<Record<string, unknown>>('/users/me/');
+    sendResponse({ success: true, user });
+  } catch (e) {
+    sendResponse({ success: false, error: (e as Error).message });
+  }
+}
+
+chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendResponse) => {
+  logger.info('Message received:', message.type, message.payload ? '(with payload)' : '');
+  switch (message.type) {
+    case 'VIDEO_INFO':
+      currentVideo = message.payload as VideoInfo;
+      sendResponse({ received: true });
+      break;
+    case 'GET_VIDEO_INFO':
+      sendResponse(currentVideo);
+      break;
+    case 'PING':
+      sendResponse({ alive: true });
+      break;
+    case 'OPEN_SIDE_PANEL':
+      (async () => {
+        let tabId = sender.tab?.id;
+        if (!tabId) {
+          const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+          tabId = tabs[0]?.id;
+        }
+        if (tabId) {
+          try {
+            await chrome.sidePanel.open({ tabId });
+            logger.info('Side panel opened for tab', tabId);
+          } catch (e) {
+            logger.error('Failed to open side panel:', e);
+          }
+        } else {
+          logger.warn('No tab ID available for side panel');
+        }
+      })();
+      sendResponse({ opened: true });
+      break;
+    case 'AUTH_EXPIRED':
+      authService.clearSession().then(() => sendResponse({ cleared: true }));
+      return true;
+    case 'TRANSCRIPT_READY':
+      handleTranscriptReady(
+        message.payload as {
+          videoId: string;
+          videoTitle: string;
+          transcript: string;
+          segments: TranscriptSegmentWithTimestamp[];
+          source: string;
+          language: DetectedLanguage;
+        },
+        sendResponse
+      );
+      return true;
+    case 'START_TRANSLATION':
+      handleStartTranslation(
+        message.payload as { videoId: string; videoTitle: string; transcript: string; segments?: TranscriptSegmentWithTimestamp[] },
+        sendResponse
+      );
+      return true;
+    case 'GET_ME':
+      handleGetMe(sendResponse);
+      return true;
+    case 'REFRESH_TOKEN':
+      refreshTokenIfNeeded().then((ok) => sendResponse({ success: ok })).catch(() => sendResponse({ success: false }));
+      return true;
+    default:
+      logger.warn('Unknown message type:', message.type);
+      sendResponse({ error: `Unknown type: ${message.type}` });
+  }
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' && tab.url?.includes('youtube.com/watch')) {
+    chrome.tabs.sendMessage(tabId, { type: 'PING' } as ExtensionMessage).catch(() => {});
+  }
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  clearExpiredCache();
+  if (chrome.sidePanel) {
+    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+  }
+});
+
+logger.info('Background service worker started');

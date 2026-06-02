@@ -1,0 +1,122 @@
+:root {
+  --bg: #0f0f13;
+  --bg-card: #1a1a24;
+  --bg-hover: #242433;
+  --bg-active: #2a2a40;
+  --border: #2a2a3a;
+  --text: #e1e1e6;
+  --text-muted: #8888a0;
+  --primary: #7c5cfc;
+  --primary-hover: #6a48e8;
+  --red: #e04848;
+  --green: #48c774;
+  --yellow: #e0b048;
+  --radius: 10px;
+  --radius-sm: 6px;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.container { display: flex; flex-direction: column; min-height: 100vh; }
+
+.header {
+  display: flex; align-items: center; gap: 8px; padding: 12px 14px;
+  background: var(--bg-card); border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 10;
+}
+
+.brand {
+  font-size: 15px; font-weight: 800;
+  background: linear-gradient(135deg, var(--primary), #a78bfa);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+
+.content { flex: 1; padding: 12px 14px; }
+
+.source-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 10px; margin-bottom: 8px;
+  background: rgba(124, 92, 252, 0.12); border: 1px solid rgba(124, 92, 252, 0.25);
+  border-radius: 12px; font-size: 11px; color: var(--primary); font-weight: 500;
+}
+
+.tabs {
+  display: flex; gap: 2px; background: var(--bg-card);
+  border-radius: var(--radius-sm); padding: 3px; margin-bottom: 12px;
+}
+
+.tab {
+  flex: 1; padding: 8px 12px; border: none; border-radius: 4px;
+  font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s;
+  background: transparent; color: var(--text-muted); text-align: center;
+}
+.tab.active { background: var(--primary); color: #fff; }
+.tab:hover:not(.active) { color: var(--text); background: var(--bg-hover); }
+
+.card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px; margin-bottom: 10px;
+}
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 10px 16px; border: none; border-radius: var(--radius-sm);
+  font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.15s; color: #fff;
+}
+
+.btn-primary { background: var(--primary); }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-secondary { background: var(--bg-hover); border: 1px solid var(--border); }
+
+.spinner {
+  width: 20px; height: 20px; border: 2px solid rgba(124, 92, 252, 0.3);
+  border-top-color: var(--primary); border-radius: 50%; animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.error-box {
+  padding: 10px 12px; background: rgba(224, 72, 72, 0.1);
+  border: 1px solid rgba(224, 72, 72, 0.3); border-radius: var(--radius-sm);
+  color: var(--red); font-size: 13px; margin-bottom: 10px;
+}
+
+.segment-header {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  color: var(--text-muted); margin-bottom: 8px; letter-spacing: 0.5px;
+}
+
+.source-indicator { font-size: 10px; text-transform: none; letter-spacing: 0; }
+
+.segment { display: flex; gap: 10px; padding: 6px 8px; border-radius: 4px; transition: background 0.1s; }
+.segment:hover { background: var(--bg-hover); }
+.segment .time {
+  color: var(--text-muted); font-size: 11px; font-family: monospace;
+  white-space: nowrap; min-width: 44px; padding-top: 1px;
+}
+.segment .text { flex: 1; font-size: 13px; }
+
+.gloss-tag {
+  display: inline-block; padding: 4px 10px; margin: 2px 3px;
+  background: rgba(124, 92, 252, 0.15); color: var(--primary);
+  border-radius: 4px; font-size: 13px; font-weight: 500;
+}
+
+.status-bar {
+  display: flex; align-items: center; gap: 6px; padding: 8px 12px;
+  background: var(--bg-card); border-top: 1px solid var(--border);
+  font-size: 12px; color: var(--text-muted);
+}
+
+.avatar-frame {
+  width: 100%; aspect-ratio: 16/9; border: none;
+  border-radius: var(--radius-sm); background: #000;
+}
