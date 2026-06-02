@@ -25,7 +25,7 @@ export interface TranscriptSegmentWithTimestamp {
   text: string;
 }
 
-export type ExtractionSource = 'transcript_panel' | 'live_captions' | 'unavailable';
+export type ExtractionSource = 'vtt_track' | 'transcript_panel' | 'live_captions' | 'unavailable';
 
 export type DetectedLanguage = 'arabic' | 'latin' | 'unknown';
 

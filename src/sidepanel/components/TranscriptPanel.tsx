@@ -18,7 +18,7 @@ export default function TranscriptPanel({ segments, transcript, onTranslate, tra
           <span>Segments ({segments.length})</span>
           {source && (
             <span className="source-indicator">
-              {source === 'transcript_panel' ? '📝 Panel' : '🎤 Captions'}
+              {source === 'vtt_track' ? '📄 VTT Track' : source === 'transcript_panel' ? '📝 Panel' : '🎤 Captions'}
             </span>
           )}
         </div>

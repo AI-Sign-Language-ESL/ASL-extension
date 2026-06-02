@@ -147,7 +147,7 @@ export default function App() {
           <>
             {source && (
               <div className="source-badge">
-                Source: {source === 'transcript_panel' ? 'Transcript Panel' : 'Live Captions'}
+                Source: {source === 'vtt_track' ? 'VTT Track' : source === 'transcript_panel' ? 'Transcript Panel' : 'Live Captions'}
                 {language && ` · ${language === 'arabic' ? 'Arabic' : language === 'latin' ? 'English' : 'Detected'}`}
               </div>
             )}

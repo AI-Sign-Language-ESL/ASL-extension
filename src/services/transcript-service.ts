@@ -414,6 +414,201 @@ export async function enableCaptions(): Promise<boolean> {
   return false;
 }
 
+export function extractPlayerResponse(): Record<string, unknown> | null {
+  try {
+    const yt = (window as unknown as Record<string, unknown>).ytInitialPlayerResponse;
+    if (yt && typeof yt === 'object') {
+      logger.info('Found ytInitialPlayerResponse on window');
+      return yt as Record<string, unknown>;
+    }
+  } catch { }
+
+  try {
+    const scripts = document.querySelectorAll('script');
+    for (const script of scripts) {
+      const text = script.textContent || '';
+      const match = text.match(/ytInitialPlayerResponse\s*=\s*({.+?});\s*(?:var|let|const|window\.|ytcfg|$)/);
+      if (match) {
+        logger.info('Extracted ytInitialPlayerResponse from script tag');
+        return JSON.parse(match[1]) as Record<string, unknown>;
+      }
+      const match2 = text.match(/ytInitialPlayerResponse\s*=\s*({.+?});/);
+      if (match2) {
+        logger.info('Extracted ytInitialPlayerResponse from script tag (fallback regex)');
+        return JSON.parse(match2[1]) as Record<string, unknown>;
+      }
+    }
+  } catch (e) {
+    logger.error('Failed to parse ytInitialPlayerResponse:', e);
+  }
+
+  logger.warn('ytInitialPlayerResponse not found');
+  return null;
+}
+
+export function extractCaptionTracks(playerResponse: Record<string, unknown>): Array<{
+  languageCode: string;
+  baseUrl: string;
+  kind?: string;
+  isTranslatable?: boolean;
+  name?: { simpleText?: string };
+}> | null {
+  try {
+    const captions = playerResponse.captions as Record<string, unknown> | undefined;
+    if (!captions) {
+      logger.warn('No captions key in player response');
+      return null;
+    }
+    const tracklist = captions.playerCaptionsTracklistRenderer as Record<string, unknown> | undefined;
+    if (!tracklist) {
+      logger.warn('No playerCaptionsTracklistRenderer in captions');
+      return null;
+    }
+    const tracks = tracklist.captionTracks as Array<Record<string, unknown>> | undefined;
+    if (!tracks || tracks.length === 0) {
+      logger.warn('No captionTracks found');
+      return null;
+    }
+    const result = tracks.map((t) => ({
+      languageCode: t.languageCode as string,
+      baseUrl: t.baseUrl as string,
+      kind: t.kind as string | undefined,
+      isTranslatable: t.isTranslatable as boolean | undefined,
+      name: t.name as { simpleText?: string } | undefined,
+    }));
+    logger.info('Found caption tracks:', result.length);
+    result.forEach((t) => {
+      console.log('[TAFAHOM] Caption track:', t.languageCode, t.baseUrl?.slice(0, 80));
+    });
+    return result;
+  } catch (e) {
+    logger.error('Error extracting caption tracks:', e);
+    return null;
+  }
+}
+
+export async function downloadVTT(baseUrl: string): Promise<string> {
+  logger.info('Downloading VTT from:', baseUrl);
+  const response = await fetch(baseUrl);
+  if (!response.ok) {
+    throw new TranscriptError(`Failed to download VTT: HTTP ${response.status}`, 'VTT_DOWNLOAD_FAILED');
+  }
+  const vtt = await response.text();
+  logger.info('Downloaded VTT size:', vtt.length, 'bytes');
+  console.log('[TAFAHOM] Downloaded VTT size:', vtt.length);
+  return vtt;
+}
+
+export function parseVTT(vttContent: string): TranscriptSegmentWithTimestamp[] {
+  const segments: TranscriptSegmentWithTimestamp[] = [];
+  const lines = vttContent.split(/\r?\n/);
+
+  let currentTimestamp = '';
+  let currentText = '';
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+
+    if (line === '') {
+      if (currentTimestamp && currentText) {
+        segments.push({ timestamp: currentTimestamp, text: currentText.trim() });
+      }
+      currentTimestamp = '';
+      currentText = '';
+      continue;
+    }
+
+    if (line.startsWith('WEBVTT') || line.startsWith('Kind:') || line.startsWith('Language:')) {
+      continue;
+    }
+
+    const timeMatch = line.match(/(\d{1,2}:?\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{1,2}:?\d{2}:\d{2}\.\d{3})/);
+    if (timeMatch) {
+      currentTimestamp = formatTimestamp(timeMatch[1]);
+      continue;
+    }
+
+    if (line.startsWith('NOTE ') || line.startsWith('STYLE') || line.startsWith('REGION')) {
+      currentTimestamp = '';
+      currentText = '';
+      continue;
+    }
+
+    if (currentTimestamp && line && !line.startsWith('[')) {
+      currentText += (currentText ? ' ' : '') + line;
+    }
+  }
+
+  if (currentTimestamp && currentText) {
+    segments.push({ timestamp: currentTimestamp, text: currentText.trim() });
+  }
+
+  logger.info('Parsed VTT segments:', segments.length);
+  console.log('[TAFAHOM] Parsed transcript segments:', segments.length);
+  return segments;
+}
+
+function formatTimestamp(t: string): string {
+  const parts = t.split(':');
+  if (parts.length === 3) {
+    const h = parts[0].padStart(2, '0');
+    const m = parts[1].padStart(2, '0');
+    const s = parts[2].split('.')[0].padStart(2, '0');
+    return `${h}:${m}:${s}`;
+  }
+  if (parts.length === 2) {
+    const m = parts[0].padStart(2, '0');
+    const s = parts[1].split('.')[0].padStart(2, '0');
+    return `${m}:${s}`;
+  }
+  return t;
+}
+
+export async function extractFromCaptionTracks(): Promise<{
+  segments: TranscriptSegmentWithTimestamp[];
+  transcript: string;
+  language: string;
+} | null> {
+  const playerResponse = extractPlayerResponse();
+  if (!playerResponse) {
+    logger.warn('No player response available for caption track extraction');
+    return null;
+  }
+
+  const tracks = extractCaptionTracks(playerResponse);
+  if (!tracks || tracks.length === 0) {
+    logger.warn('No caption tracks found in player response');
+    return null;
+  }
+
+  const arabicTrack = tracks.find((t) => t.languageCode === 'ar' || t.languageCode === 'ara');
+  const preferredTrack = arabicTrack || tracks[0];
+
+  logger.info('Using caption track:', preferredTrack.languageCode);
+  console.log('[TAFAHOM] Arabic track detected:', preferredTrack.languageCode);
+  console.log('[TAFAHOM] Track URL:', preferredTrack.baseUrl);
+
+  let vttContent: string;
+  try {
+    vttContent = await downloadVTT(preferredTrack.baseUrl);
+  } catch (e) {
+    logger.error('Failed to download VTT:', e);
+    return null;
+  }
+
+  const segments = parseVTT(vttContent);
+  if (segments.length === 0) {
+    logger.warn('No segments parsed from VTT');
+    return null;
+  }
+
+  const transcript = segments.map((s) => s.text).join(' ');
+  logger.info('Sending transcript to backend, segments:', segments.length);
+  console.log('[TAFAHOM] Transcript segments:', segments.length);
+
+  return { segments, transcript, language: preferredTrack.languageCode };
+}
+
 export async function extractTranscript(): Promise<ExtractionResult> {
   const videoId = extractVideoId(window.location.href);
   if (!videoId) throw new TranscriptError('No video ID found', 'NO_VIDEO_ID');
@@ -422,6 +617,21 @@ export async function extractTranscript(): Promise<ExtractionResult> {
                   document.querySelector('#title h1');
   const videoTitle = titleEl?.textContent?.trim() || document.title.replace(' - YouTube', '').trim() || '';
 
+  const vttResult = await extractFromCaptionTracks();
+  if (vttResult && vttResult.segments.length > 0) {
+    const language: DetectedLanguage = vttResult.language === 'ar' || vttResult.language === 'ara' ? 'arabic' : 'latin';
+    return {
+      success: true,
+      videoId,
+      videoTitle,
+      segments: vttResult.segments,
+      transcript: vttResult.transcript,
+      source: 'vtt_track',
+      language,
+    };
+  }
+
+  logger.info('VTT track extraction failed, trying transcript panel...');
   const panelResult = await extractFromTranscriptPanel();
   if (panelResult && panelResult.segments.length > 0) {
     const transcript = panelResult.transcript;
