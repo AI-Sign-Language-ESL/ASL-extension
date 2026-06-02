@@ -415,27 +415,88 @@ export async function enableCaptions(): Promise<boolean> {
 }
 
 export function extractPlayerResponse(): Record<string, unknown> | null {
+  console.log('[TAFAHOM] Starting extraction - checking ytInitialPlayerResponse');
+
   try {
     const yt = (window as unknown as Record<string, unknown>).ytInitialPlayerResponse;
     if (yt && typeof yt === 'object') {
       logger.info('Found ytInitialPlayerResponse on window');
+      console.log('[TAFAHOM] ytInitialPlayerResponse found on window');
+      const captions = (yt as Record<string, unknown>).captions;
+      console.log('[TAFAHOM] playerResponse.captions:', captions ? 'exists' : 'undefined');
+      if (captions) {
+        const tracklist = (captions as Record<string, unknown>).playerCaptionsTracklistRenderer;
+        console.log('[TAFAHOM] playerResponse.captions.playerCaptionsTracklistRenderer:', tracklist ? 'exists' : 'undefined');
+        if (tracklist) {
+          const tracks = (tracklist as Record<string, unknown>).captionTracks;
+          console.log('[TAFAHOM] captionTracks:', tracks ? `found ${(tracks as unknown[]).length} tracks` : 'undefined');
+        }
+      }
       return yt as Record<string, unknown>;
     }
   } catch { }
 
   try {
     const scripts = document.querySelectorAll('script');
+    console.log('[TAFAHOM] Scanning', scripts.length, 'script tags for ytInitialPlayerResponse');
     for (const script of scripts) {
       const text = script.textContent || '';
-      const match = text.match(/ytInitialPlayerResponse\s*=\s*({.+?});\s*(?:var|let|const|window\.|ytcfg|$)/);
-      if (match) {
-        logger.info('Extracted ytInitialPlayerResponse from script tag');
-        return JSON.parse(match[1]) as Record<string, unknown>;
+      if (!text.includes('ytInitialPlayerResponse')) continue;
+
+      const marker = 'ytInitialPlayerResponse = ';
+      const idx = text.indexOf(marker);
+      if (idx === -1) continue;
+
+      const start = idx + marker.length;
+      if (text[start] !== '{') continue;
+
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+      let end = start;
+
+      for (let i = start; i < text.length; i++) {
+        const ch = text[i];
+        if (escape) { escape = false; continue; }
+        if (ch === '\\' && inString) { escape = true; continue; }
+        if (ch === '"') { inString = !inString; continue; }
+        if (inString) continue;
+        if (ch === '{') depth++;
+        else if (ch === '}') {
+          depth--;
+          if (depth === 0) { end = i + 1; break; }
+        }
       }
-      const match2 = text.match(/ytInitialPlayerResponse\s*=\s*({.+?});/);
-      if (match2) {
-        logger.info('Extracted ytInitialPlayerResponse from script tag (fallback regex)');
-        return JSON.parse(match2[1]) as Record<string, unknown>;
+
+      if (depth === 0 && end > start) {
+        try {
+          const jsonStr = text.slice(start, end);
+          const data = JSON.parse(jsonStr) as Record<string, unknown>;
+          logger.info('Extracted ytInitialPlayerResponse from script tag (balanced braces)');
+          console.log('[TAFAHOM] ytInitialPlayerResponse extracted from script tag');
+
+          const captions = data.captions;
+          console.log('[TAFAHOM] playerResponse.captions:', captions ? 'exists' : 'undefined');
+          if (captions) {
+            const captionsObj = captions as Record<string, unknown>;
+            const tracklist = captionsObj.playerCaptionsTracklistRenderer;
+            console.log('[TAFAHOM] playerResponse.captions.playerCaptionsTracklistRenderer:', tracklist ? 'exists' : 'undefined');
+            if (tracklist) {
+              const tracklistObj = tracklist as Record<string, unknown>;
+              const tracks = tracklistObj.captionTracks;
+              console.log('[TAFAHOM] captionTracks:', tracks ? `found ${(tracks as unknown[]).length} tracks` : 'undefined');
+              if (tracks) {
+                for (const t of tracks as Array<Record<string, unknown>>) {
+                  console.log('[TAFAHOM] Caption track:', t.languageCode, (t.baseUrl as string)?.slice(0, 80));
+                }
+              }
+            }
+          }
+
+          return data;
+        } catch (e) {
+          logger.error('Failed to parse extracted JSON:', e);
+        }
       }
     }
   } catch (e) {
@@ -443,6 +504,7 @@ export function extractPlayerResponse(): Record<string, unknown> | null {
   }
 
   logger.warn('ytInitialPlayerResponse not found');
+  console.log('[TAFAHOM] ytInitialPlayerResponse NOT FOUND - no caption tracks available');
   return null;
 }
 
@@ -569,17 +631,25 @@ export async function extractFromCaptionTracks(): Promise<{
   transcript: string;
   language: string;
 } | null> {
+  console.log('[TAFAHOM] Starting extractFromCaptionTracks');
   const playerResponse = extractPlayerResponse();
   if (!playerResponse) {
     logger.warn('No player response available for caption track extraction');
+    console.log('[TAFAHOM] extractFromCaptionTracks: FAILED - no player response');
     return null;
   }
 
   const tracks = extractCaptionTracks(playerResponse);
   if (!tracks || tracks.length === 0) {
     logger.warn('No caption tracks found in player response');
+    console.log('[TAFAHOM] extractFromCaptionTracks: FAILED - no caption tracks');
     return null;
   }
+
+  console.log('[TAFAHOM] Found', tracks.length, 'caption tracks');
+  tracks.forEach((t, i) => {
+    console.log('[TAFAHOM] Track', i, ':', t.languageCode, '-', (t.baseUrl || '').slice(0, 60));
+  });
 
   const arabicTrack = tracks.find((t) => t.languageCode === 'ar' || t.languageCode === 'ara');
   const preferredTrack = arabicTrack || tracks[0];
@@ -587,29 +657,39 @@ export async function extractFromCaptionTracks(): Promise<{
   logger.info('Using caption track:', preferredTrack.languageCode);
   console.log('[TAFAHOM] Arabic track detected:', preferredTrack.languageCode);
   console.log('[TAFAHOM] Track URL:', preferredTrack.baseUrl);
+  console.log('[TAFAHOM] Downloading VTT from track URL');
 
   let vttContent: string;
   try {
     vttContent = await downloadVTT(preferredTrack.baseUrl);
   } catch (e) {
     logger.error('Failed to download VTT:', e);
+    console.log('[TAFAHOM] VTT download FAILED:', (e as Error).message);
     return null;
   }
 
   const segments = parseVTT(vttContent);
   if (segments.length === 0) {
     logger.warn('No segments parsed from VTT');
+    console.log('[TAFAHOM] parseVTT returned 0 segments');
     return null;
   }
 
   const transcript = segments.map((s) => s.text).join(' ');
   logger.info('Sending transcript to backend, segments:', segments.length);
   console.log('[TAFAHOM] Transcript segments:', segments.length);
+  console.log('[TAFAHOM] Sending transcript to backend');
 
   return { segments, transcript, language: preferredTrack.languageCode };
 }
 
 export async function extractTranscript(): Promise<ExtractionResult> {
+  console.log('[TAFAHOM] Starting extraction');
+  console.log('[TAFAHOM] Transcript rows:', document.querySelectorAll('ytd-transcript-segment-renderer').length);
+  console.log('[TAFAHOM] Caption segments:', document.querySelectorAll('.ytp-caption-segment').length);
+  console.log('[TAFAHOM] Caption container:', document.querySelector('.ytp-caption-window-container'));
+  console.log('[TAFAHOM] ytInitialPlayerResponse on window:', !!(window as unknown as Record<string, unknown>).ytInitialPlayerResponse);
+
   const videoId = extractVideoId(window.location.href);
   if (!videoId) throw new TranscriptError('No video ID found', 'NO_VIDEO_ID');
 
